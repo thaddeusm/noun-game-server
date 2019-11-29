@@ -1,0 +1,7 @@
+{
+	"version": 1,
+	"alias": ["noun-game-server.now.sh"],
+	"env": {
+	  "NODE_ENV": "production"
+	}
+}
