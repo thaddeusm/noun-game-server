@@ -46,6 +46,8 @@ const roomExists = function(roomToCheck) {
 }
 
 io.on('connection', socket => {
+  io.to(socket.id).emit('connected')
+
   console.log('a user connected')
 
   // set up a game room
