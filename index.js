@@ -188,8 +188,10 @@ io.on('connection', socket => {
   })
 
   socket.on('disconnect', () => {
+    // send notification to device
+    io.to(socket.id).emit('disconnected')
+
     // send notification to room
-    io.to(idDictionary[socket.id]).emit('deviceDisconnection')
     io.to(deviceDictionary[socket.id]).emit('deviceDisconnection', socket.id)
   })
 
