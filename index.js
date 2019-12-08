@@ -3,9 +3,36 @@ const server = require('http').Server(app)
 const io = require('socket.io')(server)
 
 const simpleID = require('simple-id')
+const gamePrompts = require('./gameData.json')
 
 // hold information about ongoing games
-let gameDictionary = {}
+let gameDictionary = {
+  /* example object:
+  1234: {
+    players: [{
+      nickname: 'Tina',
+      score: 10
+    }],
+    judge: 0 (index of player),
+    shuffledPrompts: {
+      "people": [],
+      "places": [],
+      "things": [],
+      "activities": [],
+      "ideas": []
+    },
+    nextPromptIndexes: {
+      "people": 1,
+      "places": 0,
+      "things": 0,
+      "activities": 3,
+      "ideas": 0
+    },
+    started: false,
+    completed: false
+  } 
+  */
+}
 
 // this object holds information about connected devices and rooms
 let deviceDictionary = {}
@@ -31,9 +58,9 @@ const roomClosed = function(roomToCheck) {
 const roomExists = function(roomToCheck) {
   let check = false
 
-  let dictionary = closedRooms
+  let dictionary = gameDictionary
 
-  let registeredRooms = Object.values(dictionary)
+  let registeredRooms = Object.keys(dictionary)
 
   for (let i=0; i<registeredRooms.length; i++) {
     if (registeredRooms[i] == roomToCheck) {
@@ -45,6 +72,72 @@ const roomExists = function(roomToCheck) {
   return check
 }
 
+const createNewRoom = function() {
+  let id = simpleID(4, '1234567890')
+
+  if (!roomExists(id)) {
+    addNewGameRecord(id)
+    return id
+  } else {
+    createNewRoom()
+  }
+}
+
+const nicknameIsUnique = function(nickname, roomToCheck) {
+  let check = true
+
+  console.log(gameDictionary)
+  console.log(roomToCheck)
+
+  let players = gameDictionary[roomToCheck].players
+
+  for (let i=0; i<players.length; i++) {
+    if (players[i].nickname == nickname) {
+      check = false
+      break
+    }
+  }
+
+  return check
+}
+
+const addNewGameRecord = function(roomID) {
+  gameDictionary[roomID] = {
+    players: [],
+    judge: 0,
+    shuffledPrompts: {
+      "people": shuffle(gamePrompts.categories.people),
+      "places": shuffle(gamePrompts.categories.places),
+      "things": shuffle(gamePrompts.categories.things),
+      "activities": shuffle(gamePrompts.categories.activities),
+      "ideas": shuffle(gamePrompts.categories.ideas)
+    },
+    nextPromptIndexes: {
+      "people": 0,
+      "places": 0,
+      "things": 0,
+      "activities": 0,
+      "ideas": 0
+    },
+    started: false,
+    completed: false
+  }
+
+  return gameDictionary[roomID]
+}
+
+const shuffle = function(arr) {
+  var j, x, i
+  for (i = arr.length - 1; i > 0; i--) {
+      j = Math.floor(Math.random() * (i + 1))
+      x = arr[i]
+      arr[i] = arr[j]
+      arr[j] = x
+  }
+
+  return arr
+}
+
 io.on('connection', socket => {
   io.to(socket.id).emit('connected')
 
@@ -52,18 +145,14 @@ io.on('connection', socket => {
 
   // set up a game room
   socket.on('createRoom', () => {
-    let newID = simpleID(4, '1234567890')
+    let newID = createNewRoom()
 
     // send host to newly created room
     socket.join(newID)
 
-    // register host in dictionary
+    // register host device in dictionary
     deviceDictionary[socket.id] = newID
 
-    // establish property as array in response dictionary
-    gameDictionary[newID] = []
-
-    // send room id back to host
     io.to(newID).emit('gameRoomEstablished', newID)
   })
 
@@ -76,7 +165,13 @@ io.on('connection', socket => {
       deviceDictionary[socket.id] = room
 
       // send notification to game device and host
-      io.to(socket.id).emit('roomJoined', room)
+      let nicknames = []
+
+      gameDictionary[room].players.forEach((obj) => {
+        nicknames.push(obj.nickname)
+      })
+
+      io.to(socket.id).emit('roomJoined', room, nicknames)
       io.to(room).emit('gameDeviceConnected', socket.id)
 
     } else {
@@ -86,25 +181,85 @@ io.on('connection', socket => {
   })
 
   // game device user sends their shortened name for identification
-  socket.on('sendingUsername', (name) => {
-    io.to(deviceDictionary[socket.id]).emit('incomingUsername', name)
+  socket.on('checkNickname', (nickname) => {
+    let room = deviceDictionary[socket.id]
+
+    let isUnique = nicknameIsUnique(nickname, room)
+
+    if (isUnique) {
+      io.to(socket.id).emit('nicknameAccepted')
+      gameDictionary[room].players.push({nickname: nickname, score: 0})
+
+      io.to(room).emit('newUserConnected', nickname)
+
+      if (gameDictionary[room].started) {
+        io.to(room).emit('allowGameStart')
+      }
+    } else {
+      io.to(socket.id).emit('nicknameRejected')
+    }
   })
 
   // game device requests data
   socket.on('requestGameData', () => {
     let roomID = deviceDictionary[socket.id]
 
-    io.to(roomID).emit('gameDataRequested')
-  })
-
-  // host sends activity data to connected client
-  socket.on('gameDataIncoming', (data) => {
-    io.to(deviceDictionary[socket.id]).emit('incomingGameData', data)
+    io.to(socket.id).emit('gameDataIncoming', gameDictionary[roomID])
   })
 
   // host sends start signal
   socket.on('sendStartSignal', () => {
-    io.to(deviceDictionary[socket.id]).emit('allowGameStart')
+    let gameRoom = deviceDictionary[socket.id]
+
+    io.to(gameRoom).emit('allowGameStart')
+
+    gameDictionary[gameRoom].started = true
+  })
+
+  // judge selects category, which starts the round
+  socket.on('startRound', (data) => {
+    let category = data.category
+    let game = gameDictionary[deviceDictionary[socket.id]]
+    let nextIndex = game.nextPromptIndexes[category]
+    let prompt = game.shuffledPrompts[category][nextIndex]
+
+    // send prompt to writers
+    io.to(deviceDictionary[socket.id]).emit('promptIncoming', {category: category, prompt: prompt})
+
+    // increment prompt category
+    game.nextPromptIndexes[category]++
+  })
+
+  // writer sends response to judge
+  socket.on('sendResponse', (data) => {
+    io.to(deviceDictionary[socket.id]).emit('responseIncoming', data)
+  });
+
+  // judge makes choice, which ends the round
+  socket.on('endRound', (data) => {
+    let game = gameDictionary[deviceDictionary[socket.id]]
+    let numOfPlayers = game.players.length
+
+    let winningPlayerIndex;
+    for (let i=0; i<numOfPlayers; i++) {
+      if (game.players[i].nickname == data.winner) {
+        winningPlayerIndex = i;
+        break
+      }
+    }
+
+    // increment winner's score
+    game.players[winningPlayerIndex].score += 1
+
+    // increment judge
+    if (game.judge !== numOfPlayers) {
+      game.judge++
+    } else {
+      game.judge = 0
+    }
+
+    io.to(deviceDictionary[socket.id]).emit('winnerChosen', winningPlayerIndex)
+    io.to(deviceDictionary[socket.id]).emit('changeRounds', game)
   })
 
   // game device sends activity response
